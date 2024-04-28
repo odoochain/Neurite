@@ -53,6 +53,17 @@ myCodeMirror.on("scroll", function () {
     }
 });
 
+// Helper function to determine if a CodeMirror position is within a marked range
+function isWithinMarkedText(cm, pos, className) {
+    var lineMarkers = cm.findMarksAt(pos);
+    for (var i = 0; i < lineMarkers.length; i++) {
+        if (lineMarkers[i].className === className) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 myCodeMirror.on("mousedown", function (cm, event) {
     var pos = cm.coordsChar({ left: event.clientX, top: event.clientY });
@@ -70,30 +81,32 @@ myCodeMirror.on("mousedown", function (cm, event) {
 
     if (isWithin) {
         const lineMarkers = cm.findMarksAt(pos);
-        for (var i = 0; i < lineMarkers.length; i++) {
-            if (lineMarkers[i].className === 'node-title') {
-                const from = lineMarkers[i].find().from;
-                const to = lineMarkers[i].find().to;
-                const title = cm.getRange(from, to);
+        let titles = lineMarkers.filter(marker => marker.className === 'node-title')
+            .map(marker => cm.getRange(marker.find().from, marker.find().to));
 
-                // Check if click is at the start or end of the marked text
+        if (titles.length > 0) {
+            // Select the longest title
+            const longestTitle = titles.reduce((a, b) => a.length > b.length ? a : b);
+            const markerForLongestTitle = lineMarkers.find(marker => {
+                const rangeText = cm.getRange(marker.find().from, marker.find().to);
+                return rangeText === longestTitle;
+            });
+
+            if (markerForLongestTitle) {
+                const from = markerForLongestTitle.find().from;
+                const to = markerForLongestTitle.find().to;
+
+                // Now using the longest title's from and to positions
                 if (pos.ch === from.ch || pos.ch === to.ch) {
-                    if (title.length === 1) {
-                        // If the title is one character long, perform click behavior
-                        handleTitleClick(title, cm);
+                    if (longestTitle.length === 1) {
+                        handleTitleClick(longestTitle, cm);
                     } else {
-                        // If click is at the start or end of a title longer than one character, just place the cursor
                         cm.setCursor(pos);
                     }
                 } else {
-                    // prevent default click event
                     event.preventDefault();
-
-                    // Scroll and zoom to the title
-                    handleTitleClick(title, cm);
+                    handleTitleClick(longestTitle, cm);
                 }
-
-                break; // Exit the loop once a title is found
             }
         }
     } else {
@@ -110,7 +123,7 @@ myCodeMirror.on("mousedown", function (cm, event) {
 
         // Check if the click is on a line that starts with 'node:'
         const lineText = cm.getLine(pos.line);
-        const nodeInputValue = nodeTag;  // add ':' at the end
+        const nodeInputValue = nodeTag;
         if (lineText.startsWith(nodeInputValue)) {
             // If the click is on the 'node:' line but not within the marked text, set the cursor position
             cm.setCursor(pos);
@@ -241,21 +254,6 @@ nodeTagInput.addEventListener('change', updateMode);
 refTagInput.addEventListener('change', updateMode);
 updateMode();
 
-
-
-
-
-// Helper function to determine if a CodeMirror position is within a marked range
-function isWithinMarkedText(cm, pos, className) {
-    var lineMarkers = cm.findMarksAt(pos);
-    for (var i = 0; i < lineMarkers.length; i++) {
-        if (lineMarkers[i].className === className) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Array to store node titles
 let nodeTitles = [];
 
@@ -289,6 +287,36 @@ function updateNodeTitleToLineMap() {
         }
     });
 }
+
+function highlightNodeTitles() {
+    // First clear all existing marks
+    myCodeMirror.getAllMarks().forEach(mark => mark.clear());
+
+    myCodeMirror.eachLine((line) => {
+        nodeTitles.forEach((title) => {
+            if (title.length > 0) {
+                // Escape special regex characters
+                const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(escapedTitle, "ig"); // removed \\b word boundaries
+                let match;
+                while (match = regex.exec(line.text)) {
+                    const idx = match.index;
+                    if (idx !== -1) {
+                        myCodeMirror.markText(
+                            CodeMirror.Pos(line.lineNo(), idx),
+                            CodeMirror.Pos(line.lineNo(), idx + title.length),
+                            {
+                                className: 'node-title',
+                                handleMouseEvents: true
+                            }
+                        );
+                    }
+                }
+            }
+        });
+    });
+}
+
 
 
 function getNodeSectionRange(title, cm) {
@@ -324,35 +352,6 @@ function getNodeSectionRange(title, cm) {
     //console.log("Title:", title, "Start Line:", startLineNo, "End Line:", endLineNo);
 
     return { startLineNo, endLineNo };
-}
-
-function highlightNodeTitles() {
-    // First clear all existing marks
-    myCodeMirror.getAllMarks().forEach(mark => mark.clear());
-
-    myCodeMirror.eachLine((line) => {
-        nodeTitles.forEach((title) => {
-            if (title.length > 0) {
-                // Escape special regex characters
-                const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(escapedTitle, "ig"); // removed \\b word boundaries
-                let match;
-                while (match = regex.exec(line.text)) {
-                    const idx = match.index;
-                    if (idx !== -1) {
-                        myCodeMirror.markText(
-                            CodeMirror.Pos(line.lineNo(), idx),
-                            CodeMirror.Pos(line.lineNo(), idx + title.length),
-                            {
-                                className: 'node-title',
-                                handleMouseEvents: true
-                            }
-                        );
-                    }
-                }
-            }
-        });
-    });
 }
 
 function highlightNodeSection(title, cm) {
@@ -456,65 +455,67 @@ function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function removeEdgeFromZettelkasten(title1, title2) {
+function removeEdgeFromZettelkasten(title1, title2, removeOnlyFromTitle1 = false) {
     if (!title1 || !title2) {
         console.error("One or both titles are empty or undefined.");
         return;
     }
     const lineCount = myCodeMirror.lineCount();
-    const titles = [title1, title2];
-
     const closingBracket = bracketsMap[refTag];
 
-    titles.forEach((title) => {
-        const nodeLine = getNodeTitleLine(title, myCodeMirror);
-        if (nodeLine !== null) {
-            for (let j = nodeLine + 1; j < lineCount; j++) {
-                let nextLine = myCodeMirror.getLine(j);
-                if (nextLine.startsWith(nodeTag)) break;
+    const titlesToProcess = removeOnlyFromTitle1 ? [title1] : [title1, title2];
 
-                let escapedRefTag = escapeRegExp(refTag);
-                let lineHasRefTag = new RegExp(escapedRefTag).test(nextLine);
+    titlesToProcess.forEach((title) => {
+    const nodeLine = getNodeTitleLine(title, myCodeMirror);
+    if (nodeLine !== null) {
+        for (let j = nodeLine + 1; j < lineCount; j++) {
+            let nextLine = myCodeMirror.getLine(j);
+            if (nextLine.startsWith(nodeTag)) break;
 
-                if (lineHasRefTag) {
-                    titles.forEach((innerTitle) => {
-                        if (title === innerTitle) {
-                            return; // Skip if the title matches innerTitle
+            let escapedRefTag = escapeRegExp(refTag);
+            let lineHasRefTag = new RegExp(escapedRefTag).test(nextLine);
+
+            if (lineHasRefTag) {
+                let targetTitle;
+                if (removeOnlyFromTitle1) {
+                    targetTitle = title2;
+                } else {
+                    // When not removing only from title1, we need to look for each title in the other's references
+                    targetTitle = title === title1 ? title2 : title1;
+                }
+                let escapedTargetTitle = escapeRegExp(targetTitle);
+
+                    let regExp;
+                    if (closingBracket) {
+                        regExp = new RegExp(`(${escapedRefTag}\\s*${escapedTargetTitle}\\s*${escapeRegExp(closingBracket)})|(,?\\s*${escapedTargetTitle}\\s*,?)`, 'g');
+                    } else {
+                        regExp = new RegExp(`(${escapedRefTag}\\s*${escapedTargetTitle}\\s*${escapedRefTag})|(,?\\s*${escapedTargetTitle}\\s*,?)`, 'g');
+                    }
+
+                    nextLine = nextLine.replace(regExp, (match, p1, p2) => {
+                        if (p1) {
+                            return '';
+                        } else if (p2) {
+                            return p2.startsWith(',') ? ',' : '';
                         }
-                        let escapedInnerTitle = escapeRegExp(innerTitle);
+                    }).trim();
 
-                        let regExp;
-                        if (closingBracket) {
-                            regExp = new RegExp(`(${escapedRefTag}\\s*${escapedInnerTitle}\\s*${escapeRegExp(closingBracket)})|(,?\\s*${escapedInnerTitle}\\s*,?)`, 'g');
-                        } else {
-                            regExp = new RegExp(`(${escapedRefTag}\\s*${escapedInnerTitle}\\s*${escapedRefTag})|(,?\\s*${escapedInnerTitle}\\s*,?)`, 'g');
+                    // Remove trailing commas and spaces
+                    nextLine = nextLine.replace(/,\s*$/, '').trim();
+
+                    if (closingBracket) {
+                        let emptyBracketsRegExp = new RegExp(`${escapedRefTag}\\s*${escapeRegExp(closingBracket)}`, 'g');
+                        if (emptyBracketsRegExp.test(nextLine)) {
+                            nextLine = nextLine.replace(emptyBracketsRegExp, '');
                         }
-
-                        nextLine = nextLine.replace(regExp, (match, p1, p2) => {
-                            if (p1) {
-                                return '';
-                            } else if (p2) {
-                                return p2.startsWith(',') ? ',' : '';
-                            }
-                        }).trim();
-
-                        // Remove trailing commas and spaces
-                        nextLine = nextLine.replace(/,\s*$/, '').trim();
-
-                        if (closingBracket) {
-                            let emptyBracketsRegExp = new RegExp(`${escapedRefTag}\\s*${escapeRegExp(closingBracket)}`, 'g');
-                            if (emptyBracketsRegExp.test(nextLine)) {
-                                nextLine = nextLine.replace(emptyBracketsRegExp, '');
-                            }
-                        } else {
-                            let lonelyRefTag = new RegExp(`^${escapedRefTag}\\s*$`);
-                            if (lonelyRefTag.test(nextLine)) {
-                                nextLine = '';
-                            }
+                    } else {
+                        let lonelyRefTag = new RegExp(`^${escapedRefTag}\\s*$`);
+                        if (lonelyRefTag.test(nextLine)) {
+                            nextLine = '';
                         }
+                    }
 
-                        myCodeMirror.replaceRange(nextLine, { line: j, ch: 0 }, { line: j, ch: myCodeMirror.getLine(j).length });
-                    });
+                    myCodeMirror.replaceRange(nextLine, { line: j, ch: 0 }, { line: j, ch: myCodeMirror.getLine(j).length });
                 }
             }
         }
